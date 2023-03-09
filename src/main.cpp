@@ -9,11 +9,11 @@
 // Coil spacing in mm
 #define COIL_SPACING 100
 // Below the min signal, that coil is ignored. If both below, motors disabled.
-#define MIN_SIGNAL 10
+#define MIN_SIGNAL 5
 // Place the robot at this displacement (pos to the right) during calibration (align with notch on sensor)
 #define CALIBRATION_DIST 30 // must be less than COIL_SPACING/2, musn't be close to the coils!
 // Number of extra bits of resolution to aquire when sampling
-#define OVERSAMPLING 2
+#define OVERSAMPLING 0
 // Smoothing factor (using simple EWMA to reduce processing time and memory)
 #define SMOOTHING 100
 // Offset from 2*mid value before signal is inverted
@@ -25,26 +25,26 @@
 
 /* ------------------------------ Coil signals ------------------------------ */
 // Pins for peak detection signal
-#define L_SIG_PIN A0 
-#define R_SIG_PIN A1
+#define L_SIG_PIN A7
+#define R_SIG_PIN A6
 /* ---------------------------    Potentionmeters --------------------------- */
 // pot which sets max speed
-#define MAX_SPEED_PIN A4 
+// #define MAX_SPEED_PIN A4 
 // pots for tuning pid
-#define KP_PIN A5
-#define KI_PIN A6
-#define KD_PIN A7
+#define KP_PIN A0
+#define KI_PIN A2
+#define KD_PIN A3
 /* --------------------------------- Buttons -------------------------------- */
-#define MOTOR_EN_BUTTON 9 // motor enable pin
-#define ZERO_BUTTON 10 // press when robot aligned with zero displacement and angle
-#define CALIBRATE_BUTTON 11 // press when robot at calibration distance
+#define MOTOR_EN_BUTTON 2 // motor enable pin
+#define ZERO_BUTTON 4 // press when robot aligned with zero displacement and angle
+#define CALIBRATE_BUTTON 3 // press when robot at calibration distance
 /* --------------------------------- Outputs -------------------------------- */
 // PWM 
-#define L_MOTOR_PIN 3 // pwm for left motor
-#define R_MOTOR_PIN 4 // pwm for right motor
+#define L_MOTOR_PIN 10 // pwm for left motor
+#define R_MOTOR_PIN 11 // pwm for right motor
 // LEDs
-#define CLIPPING_LED 12 // on if signal above range
-#define LOW_SIGNAL_LED 13 // on if signal below range
+#define CLIPPING_LED 6 // on if signal above range
+#define LOW_SIGNAL_LED 7 // on if signal below range
 
 /* -------------------------------------------------------------------------- */
 /*                                  Variables                                 */
@@ -53,8 +53,8 @@
 /* -------------------------------- Settings -------------------------------- */
 
 // Calibration values
-int rawDistanceZero[2]={-1,-1}; // 1/E at zero distance
-int rawDistanceCalibration[2]={-1,-1}; // 1/E at calibration distance
+// int rawDistanceZero[2]={-1,-1}; // 1/E at zero distance
+// int rawDistanceCalibration[2]={-1,-1}; // 1/E at calibration distance
 // Values from potentiometers
 uint16_t maxSpeed=255; // max speed to prevent flying off
 int KP,KI,KD; // PID loop settings
@@ -62,15 +62,16 @@ int KP,KI,KD; // PID loop settings
 /* ------------------------------ Measurements ------------------------------ */
 // raw E pk-pk signal
 int16_t rawL,rawR; 
+int16_t rawMax=(2<<(10+OVERSAMPLING));
 // linearised 1/E signal
-int16_t linL,linR; 
+float linL,linR; 
 // calibration values
-int16_t zeroL,zeroR; // at displacement=0 (midpoint)
-int16_t calL,calR; // at calibration distance (on the right hand side)
+float zeroL,zeroR; // at displacement=0 (midpoint)
+float calL,calR; // at calibration distance (on the right hand side)
 
-int16_t linL_mm,linR_mm; // scaled to mm
+float linL_mm,linR_mm; // scaled to mm
 
-int16_t dispL_mm,dispR_mm; // inflection points removed (negative when wire goes past coil)
+float dispL_mm,dispR_mm; // inflection points removed (negative when wire goes past coil)
 
 double displacement=0; // linear displacement mapped based on calibration values at 0mm and calibration distance
 double angle=0; // angle between vehicle and tangent of AC line
@@ -102,16 +103,28 @@ void readPotentiometers() {
   KP=analogRead(KP_PIN);
   KI=analogRead(KI_PIN);
   KD=analogRead(KD_PIN);
-  maxSpeed=analogRead(MAX_SPEED_PIN);
+  // maxSpeed=analogRead(MAX_SPEED_PIN);
 }
 // read peak values from inductors, convert to linear values
 void readInductors() {
   // Read coils
-  rawL=lPeak.read(L_SIG_PIN);
-  rawR=rPeak.read(L_SIG_PIN);
+  // rawL=lPeak.read(L_SIG_PIN);
+  // rawR=rPeak.read(R_SIG_PIN);
+
+  rawL=lPeak.read(KP_PIN);
+  rawR=rPeak.read(KD_PIN);
+  
   // Linearise
-  linL=(2<<(10+OVERSAMPLING))/rawL;
-  linR=(2<<(10+OVERSAMPLING))/rawR;
+  if (rawL==0)
+    linL=(float)(rawMax);
+  else
+    linL=((float)(rawMax))/(float)rawL;
+  if (rawR==0)
+    linR=(float)(rawMax);
+  else
+    linR=((float)(rawMax))/(float)rawR;
+
+  
 }
 // Check if calibration button pressed, set zero points
 void calButton() {
@@ -131,20 +144,31 @@ void zeroButton() {
     delay(500); // prevent multiple activations
   }
 }
+float floatMap(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 // Map measured values to real units
 void scaleToMM() {
-  linL_mm=map(linL,zeroL,calL,COIL_SPACING/2,COIL_SPACING/2+CALIBRATION_DIST);
-  linR_mm=map(linR,zeroR,calR,COIL_SPACING/2,COIL_SPACING/2-CALIBRATION_DIST);
+  if (linL==NAN)
+    linL_mm=0;
+  else
+    linL_mm=floatMap(linL,zeroL,calL,COIL_SPACING/2,COIL_SPACING/2+CALIBRATION_DIST);
+  if (linR==NAN)
+    linR_mm=0;
+  else
+  linR_mm=floatMap(linR,zeroR,calR,COIL_SPACING/2,COIL_SPACING/2-CALIBRATION_DIST);
+  
 }
 // As soon as the difference is greater than COIL_SPACING, a coil has passed inflection
 // So we invert the output such that crossing the wire gives a negative output
 void removeInflection() {
-  if (linL_mm-linR_mm>COIL_SPACING+INVERSION_OFFSET) {
+  if (linL_mm-linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
     dispR_mm=-linR_mm;
   } else {
     dispR_mm=linR_mm;
   }
-  if (linR_mm-linL_mm>COIL_SPACING+INVERSION_OFFSET) {
+  if (linR_mm-linL_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
     dispL_mm=-linL_mm;
   } else {
     dispL_mm=linL_mm;
@@ -154,8 +178,8 @@ void calcDisplacement() {
   displacement=dispL_mm-dispR_mm;
 }
 void calcAngle() {
-  int16_t rawAngle=dispL_mm+dispR_mm;
-  angle=map(rawAngle,0,COIL_SPACING,0,90);
+  float rawAngle=dispL_mm+dispR_mm;
+  angle=floatMap(rawAngle,0,COIL_SPACING,0,90);
 }
 // read slope sensor, boost if detected
 void detectSlope() {
@@ -172,11 +196,13 @@ void saveButton() {
 bool motorEnablePressed = false;
 void motorEnableButton() {
   motorEnablePressed = true;
+  // Serial.println("x");
 }
 
 /* ---------------------------------- Setup --------------------------------- */
 
 void setup() {
+  Serial.begin(9600);
   // init PWM pins
   pinMode(L_MOTOR_PIN,OUTPUT);
   pinMode(R_MOTOR_PIN,OUTPUT);
@@ -192,10 +218,12 @@ void setup() {
   loadEEPROM();
 
   // rising edge interrupt on enable button
-  attachInterrupt(digitalPinToInterrupt(MOTOR_EN_BUTTON),motorEnableButton,RISING);
+  attachInterrupt(digitalPinToInterrupt(MOTOR_EN_BUTTON),motorEnableButton,FALLING);
 }
 
 /* ---------------------------------- Loop ---------------------------------- */
+
+bool lowSignal=false;
 
 void loop() {
   // Analog read
@@ -210,6 +238,9 @@ void loop() {
   removeInflection();
   calcDisplacement();
   calcAngle();
+
+  // if (!digitalRead(MOTOR_EN_BUTTON))
+  //   motorEnableButton();
 
   // High quality control scheme here...
   maxSpeed=map(90-angle,0,90,50,255);
@@ -227,18 +258,26 @@ void loop() {
   // int R_SPEED = constrain(direction ? (maxSpeed-map(displacement,0,100,0,maxSpeed)) : maxSpeed,0,255);
 
 
-
+  
   // display if either amplitude is clipping high
-  if (rawL>=1023 || rawR>=1023){
+  if (rawL>=rawMax || rawR>=rawMax){
     digitalWrite(CLIPPING_LED,HIGH);
   } else {
     digitalWrite(CLIPPING_LED,LOW);
     // display if either amplitude is too low. If it is, disable motors
     if (rawL<MIN_SIGNAL || rawR<MIN_SIGNAL) {
-      motorsEnabled=false;
-      digitalWrite(LOW_SIGNAL_LED,HIGH);
-    } else{
-      digitalWrite(LOW_SIGNAL_LED,LOW);
+      if (!lowSignal){
+        motorsEnabled=false;
+        digitalWrite(LOW_SIGNAL_LED,HIGH);
+        lowSignal=true;
+        Serial.println("Low Signal");
+      }
+    } else {
+      if (lowSignal){
+        digitalWrite(LOW_SIGNAL_LED,LOW);
+        lowSignal=false;
+        Serial.println("Signal restored");
+      }
     }
   }
 
@@ -248,10 +287,14 @@ void loop() {
       motorsEnabled=false;
       analogWrite(L_MOTOR_PIN,0);
       analogWrite(R_MOTOR_PIN,0);
+      Serial.println("PWM output disabled");
     } else {
       motorsEnabled=true;
+      Serial.println("PWM output enabled");
     }
+    noInterrupts();
     delay(10); // dodgey debounce
+    interrupts();
   }
 
   // Activate motors only if enable pressed, signal within range, and calibration data loaded
@@ -260,9 +303,18 @@ void loop() {
     analogWrite(R_MOTOR_PIN,speedR);
   } 
 
+  Serial.print(">rawL:");Serial.println(rawL);
+  Serial.print(">rawR:");Serial.println(rawR);
+  Serial.print(">linL:");Serial.println(linL);
+  Serial.print(">linR:");Serial.println(linR);
+  Serial.print(">linL_mm:");Serial.println(linL_mm);
+  Serial.print(">linR_mm:");Serial.println(linR_mm);
+  Serial.print(">dispL_mm:");Serial.println(dispL_mm);
+  Serial.print(">dispR_mm:");Serial.println(dispR_mm);
   Serial.print(">disp:");Serial.println(displacement);
   Serial.print(">angle:");Serial.println(angle);
   // Serial.print(">3D|position:S:cube:R:0:"); Serial.print(angle); Serial.print(":0:P:");Serial.print(displacement);Serial.println(":0:0");
+  
 
 
 }
