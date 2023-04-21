@@ -9,7 +9,7 @@
 // Coil spacing in mm
 #define COIL_SPACING 100
 // Below the min signal, that coil is ignored. If both below, motors disabled.
-#define MIN_SIGNAL 5
+#define MIN_SIGNAL 0.5
 // Place the robot at this displacement (pos to the right) during calibration (align with notch on sensor)
 #define CALIBRATION_DIST 30 // must be less than COIL_SPACING/2, musn't be close to the coils!
 // Number of extra bits of resolution to aquire when sampling
@@ -18,6 +18,12 @@
 #define SMOOTHING 100
 // Offset from 2*mid value before signal is inverted
 #define INVERSION_OFFSET 0
+
+#define ADC_OFFSET 0.5
+
+#define A_REF 4.5
+
+#define ADC_RANGE 1024.0
 
 /* -------------------------------------------------------------------------- */
 /*                               Pin definitions                              */
@@ -61,8 +67,8 @@ int KP,KI,KD; // PID loop settings
 
 /* ------------------------------ Measurements ------------------------------ */
 // raw E pk-pk signal
-int16_t rawL,rawR; 
-int16_t rawMax=(2<<(10+OVERSAMPLING));
+float rawL,rawR; 
+float rawMax=A_REF; // max voltage
 // linearised 1/E signal
 float linL,linR; 
 // calibration values
@@ -111,18 +117,21 @@ void readInductors() {
   // rawL=lPeak.read(L_SIG_PIN);
   // rawR=rPeak.read(R_SIG_PIN);
 
-  rawL=lPeak.read(KP_PIN);
-  rawR=rPeak.read(KD_PIN);
+  rawL=(analogRead(L_SIG_PIN)+ADC_OFFSET)*(A_REF/ADC_RANGE); // calc input voltages
+  rawR=(analogRead(R_SIG_PIN)+ADC_OFFSET)*(A_REF/ADC_RANGE);
+
+  // rawL=lPeak.read(KP_PIN);
+  // rawR=rPeak.read(KD_PIN);
   
   // Linearise
   if (rawL==0)
-    linL=(float)(rawMax);
+    linL=0;
   else
-    linL=((float)(rawMax))/(float)rawL;
+    linL=((1.0))/rawL;
   if (rawR==0)
-    linR=(float)(rawMax);
+    linR=0;
   else
-    linR=((float)(rawMax))/(float)rawR;
+    linR=((1.0))/rawR;
 
   
 }
@@ -163,23 +172,25 @@ void scaleToMM() {
 // As soon as the difference is greater than COIL_SPACING, a coil has passed inflection
 // So we invert the output such that crossing the wire gives a negative output
 void removeInflection() {
-  if (linL_mm-linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
-    dispR_mm=-linR_mm;
-  } else {
-    dispR_mm=linR_mm;
-  }
-  if (linR_mm-linL_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
-    dispL_mm=-linL_mm;
-  } else {
-    dispL_mm=linL_mm;
-  }
+  // if (linL_mm-linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
+  //   dispR_mm=-linR_mm;
+  // } else {
+  //   dispR_mm=linR_mm;
+  // }
+  // if (linR_mm-linL_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
+  //   dispL_mm=-linL_mm;
+  // } else {
+  //   dispL_mm=linL_mm;
+  // }
+  dispL_mm=linL_mm;
+  dispR_mm=linR_mm;
 }
 void calcDisplacement() {
   displacement=dispL_mm-dispR_mm;
 }
 void calcAngle() {
   float rawAngle=dispL_mm+dispR_mm;
-  angle=floatMap(rawAngle,0,COIL_SPACING,0,90);
+  angle=-floatMap(rawAngle,0,COIL_SPACING,180,0);
 }
 // read slope sensor, boost if detected
 void detectSlope() {
@@ -206,6 +217,7 @@ void setup() {
   // init PWM pins
   pinMode(L_MOTOR_PIN,OUTPUT);
   pinMode(R_MOTOR_PIN,OUTPUT);
+  pinMode(8,INPUT_PULLUP);
   // init LED pins
   pinMode(CLIPPING_LED,OUTPUT);
   pinMode(LOW_SIGNAL_LED,OUTPUT);
@@ -218,7 +230,7 @@ void setup() {
   loadEEPROM();
 
   // rising edge interrupt on enable button
-  attachInterrupt(digitalPinToInterrupt(MOTOR_EN_BUTTON),motorEnableButton,FALLING);
+  // attachInterrupt(digitalPinToInterrupt(MOTOR_EN_BUTTON),motorEnableButton,FALLING);
 }
 
 /* ---------------------------------- Loop ---------------------------------- */
@@ -232,21 +244,30 @@ void loop() {
   // Read buttons
   zeroButton();
   calButton();
-  saveButton();
+  // saveButton();
   // Calculate vehicle position
   scaleToMM();
   removeInflection();
   calcDisplacement();
   calcAngle();
 
-  // if (!digitalRead(MOTOR_EN_BUTTON))
-  //   motorEnableButton();
+  if (!digitalRead(MOTOR_EN_BUTTON))
+    motorEnableButton();
 
   // High quality control scheme here...
-  maxSpeed=map(90-angle,0,90,50,255);
+  // maxSpeed=map(90-angle,0,90,50,255);
 
-  int speedL=constrain(map(displacement,0,100,0,maxSpeed),0,255);
-  int speedR=constrain(map(-displacement,0,100,0,maxSpeed),0,255);
+  // int speedL=constrain(map(displacement,0,100,0,maxSpeed),0,255);
+  // int speedR=constrain(map(-displacement,0,100,0,maxSpeed),0,255);
+
+  bool tilt=digitalRead(8);
+  if (tilt) {
+    maxSpeed=200;
+  } else {
+    maxSpeed=100;
+  }
+  int speedL=constrain((int)(floatMap(rawL,1.5,4.5,10,(float)maxSpeed))-(int)angle,0,255);
+  int speedR=constrain((int)(floatMap(rawR,1.5,4.5,10,(float)maxSpeed))-(int)angle,0,255);
 
   // Apply settings
   // maxSpeed=analogRead(MAX_SPEED_PIN)>>2; // max output speed between 0 and 255
@@ -267,7 +288,7 @@ void loop() {
     // display if either amplitude is too low. If it is, disable motors
     if (rawL<MIN_SIGNAL || rawR<MIN_SIGNAL) {
       if (!lowSignal){
-        motorsEnabled=false;
+        // motorsEnabled=false;
         digitalWrite(LOW_SIGNAL_LED,HIGH);
         lowSignal=true;
         Serial.println("Low Signal");
@@ -293,7 +314,7 @@ void loop() {
       Serial.println("PWM output enabled");
     }
     noInterrupts();
-    delay(10); // dodgey debounce
+    delay(100); // dodgey debounce
     interrupts();
   }
 
@@ -301,14 +322,21 @@ void loop() {
   if (motorsEnabled) {
     analogWrite(L_MOTOR_PIN,speedL);
     analogWrite(R_MOTOR_PIN,speedR);
-  } 
+  } else {
+    analogWrite(L_MOTOR_PIN,0);
+    analogWrite(R_MOTOR_PIN,0);
+  }
 
+  Serial.print(">tilt:");Serial.println(tilt);
   Serial.print(">rawL:");Serial.println(rawL);
   Serial.print(">rawR:");Serial.println(rawR);
-  Serial.print(">linL:");Serial.println(linL);
-  Serial.print(">linR:");Serial.println(linR);
-  Serial.print(">linL_mm:");Serial.println(linL_mm);
-  Serial.print(">linR_mm:");Serial.println(linR_mm);
+  Serial.print(">speedL:");Serial.println(speedL);
+  Serial.print(">speedR:");Serial.println(speedR);
+
+  // Serial.print(">linL:");Serial.println(linL);
+  // Serial.print(">linR:");Serial.println(linR);
+  // Serial.print(">linL_mm:");Serial.println(linL_mm);
+  // Serial.print(">linR_mm:");Serial.println(linR_mm);
   Serial.print(">dispL_mm:");Serial.println(dispL_mm);
   Serial.print(">dispR_mm:");Serial.println(dispR_mm);
   Serial.print(">disp:");Serial.println(displacement);
