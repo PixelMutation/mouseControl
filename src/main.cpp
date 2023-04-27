@@ -18,7 +18,7 @@
 // Smoothing factor (using simple EWMA to reduce processing time and memory)
 #define SMOOTHING 100
 // Offset from 2*mid value before signal is inverted
-#define INVERSION_OFFSET -10
+#define INVERSION_OFFSET 15
 
 #define ADC_OFFSET 0.5
 
@@ -33,17 +33,17 @@
 #define PID_TARGET 0
 #define PID_SAMPLE_TIME 20
 
-#define PID_OUT_MIN -127
-#define PID_OUT_MAX 127
+#define PID_OUT_MIN -255
+#define PID_OUT_MAX 255
 
 #define KP_MIN 0
-#define KP_MAX 3
+#define KP_MAX 20
 
 #define KI_MIN 0
-#define KI_MAX 2
+#define KI_MAX 0
 
 #define KD_MIN 0
-#define KD_MAX 3
+#define KD_MAX 5
 
 /* -------------------------------------------------------------------------- */
 /*                               Pin definitions                              */
@@ -85,6 +85,7 @@
 // int rawDistanceCalibration[2]={-1,-1}; // 1/E at calibration distance
 // Values from potentiometers
 uint16_t maxSpeed=100; // max speed to prevent flying off
+uint16_t setSpeed=100;
 uint16_t boostSpeed=255;
 float KP,KI,KD; // PID loop settings
 
@@ -148,7 +149,7 @@ void updatePID() {
   KP=floatMap(analogRead(KP_PIN),0,1024,KP_MIN,KP_MAX);
   // KI=floatMap(analogRead(KI_PIN),0,1024,KI_MIN,KI_MAX);
   KD=floatMap(analogRead(KD_PIN),0,1024,KD_MIN,KD_MAX);
-  maxSpeed=analogRead(KI_PIN)>>2;
+  setSpeed=analogRead(KI_PIN)>>2;
   // maxSpeed=analogRead(MAX_SPEED_PIN);
   pidSteering.SetTunings(KP,KI,KD);
 
@@ -205,18 +206,18 @@ void scaleToMM() {
   if (linL==NAN)
     linL_mm=0;
   else
-    linL_mm=floatMap(linL,Settings.calL2,Settings.calL1,COIL_SPACING/2-CALIBRATION_DIST,COIL_SPACING/2+CALIBRATION_DIST);
+    linL_mm=floatMap(linL,Settings.calL1,Settings.calL2,COIL_SPACING/2-CALIBRATION_DIST,COIL_SPACING/2+CALIBRATION_DIST);
   if (linR==NAN)
     linR_mm=0;
   else
-    linR_mm=floatMap(linR,Settings.calR2,Settings.calR1,COIL_SPACING/2-CALIBRATION_DIST,COIL_SPACING/2+CALIBRATION_DIST);
+    linR_mm=floatMap(linR,Settings.calR1,Settings.calR2,COIL_SPACING/2-CALIBRATION_DIST,COIL_SPACING/2+CALIBRATION_DIST);
   
 }
 // As soon as the difference is greater than COIL_SPACING, a coil has passed inflection
 // So we invert the output such that crossing the wire gives a negative output
 bool outsideWires=false;
 void removeInflection() {
-  if (linL_mm-linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
+  if (linL_mm+linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
     // Serial.println("Outside wires");
     dispR_mm=-linR_mm;
     outsideWires=true;
@@ -224,7 +225,7 @@ void removeInflection() {
     dispR_mm=linR_mm;
     outsideWires=false;
   }
-  if (linR_mm-linL_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
+  if (linR_mm+linL_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
     // Serial.println("Outside wires");
     dispL_mm=-linL_mm;
     outsideWires=true;
@@ -237,13 +238,14 @@ void removeInflection() {
 }
 void calcDisplacement() {
   displacement=dispL_mm-dispR_mm;
-  // if (outsideWires)
-  //   displacement=-displacement;
+  if (outsideWires)
+    displacement=-displacement;
   displacement/=2;
 }
 void calcAngle() {
   float rawAngle=dispL_mm+dispR_mm;
-  angle=-floatMap(rawAngle,0,COIL_SPACING,360,0);
+  angle=floatMap(rawAngle,0,COIL_SPACING,170,-10);
+  angle=constrain(angle,0,90);
 }
 bool boost=false;
 bool tilt=false;
@@ -324,6 +326,13 @@ void loop() {
 
   digitalWrite(OUTSIDE_WIRE_LED,outsideWires);
 
+  // Apply angle
+  if (angle>5) {
+    maxSpeed=map((uint16_t)angle,0,90,setSpeed,50);
+  } else{
+    maxSpeed=setSpeed;
+  }
+
   // Apply PID
   int speedR=int(steeringRatio)+255;
   int speedL=255-int(steeringRatio);
@@ -379,10 +388,11 @@ void loop() {
   }
 
   Serial.print(">tilt:");Serial.println(tilt);
-  Serial.print(">rawL:");Serial.println(rawL);
-  Serial.print(">rawR:");Serial.println(rawR);
+  // Serial.print(">rawL:");Serial.println(rawL);
+  // Serial.print(">rawR:");Serial.println(rawR);
   Serial.print(">speedL:");Serial.println(speedL);
   Serial.print(">speedR:");Serial.println(speedR);
+  Serial.print(">maxSpeed:");Serial.println(maxSpeed);
 
   // Serial.print(">linL:");Serial.println(linL);
   // Serial.print(">linR:");Serial.println(linR);
