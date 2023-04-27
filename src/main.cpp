@@ -31,19 +31,24 @@
 /* ------------------------------- PID config ------------------------------- */
 
 #define PID_TARGET 0
-#define PID_SAMPLE_TIME 20
+#define PID_SAMPLE_TIME 1
 
 #define PID_OUT_MIN -255
 #define PID_OUT_MAX 255
 
 #define KP_MIN 0
-#define KP_MAX 20
+#define KP_MAX 1000
 
-#define KI_MIN 0
-#define KI_MAX 0
+#define KI_MIN 10
+#define KI_MAX 10
 
 #define KD_MIN 0
-#define KD_MAX 5
+#define KD_MAX 50
+
+/* ---------------------------------- Boost --------------------------------- */
+
+#define BOOST_DURATION 800
+#define BOOST_SPEED 255
 
 /* -------------------------------------------------------------------------- */
 /*                               Pin definitions                              */
@@ -247,12 +252,20 @@ void calcAngle() {
   angle=floatMap(rawAngle,0,COIL_SPACING,170,-10);
   angle=constrain(angle,0,90);
 }
+
 bool boost=false;
 bool tilt=false;
-long boostStop;
+unsigned long boostTime=0;
 // read slope sensor, boost if detected
 void detectSlope() {
   tilt=digitalRead(SLOPE_SENSOR);
+  if (tilt && !boost) {
+    boost=true;
+    boostTime=millis()+BOOST_DURATION;
+  }
+  if (millis()>=boostTime) {
+    boost=false;
+  }
 }
 
 
@@ -297,6 +310,8 @@ void setup() {
 
 bool lowSignal=false;
 long prevupdatePID=0;
+unsigned long prevCompute=0;
+int computes=0;
 
 void loop() {
   
@@ -310,106 +325,122 @@ void loop() {
   // Read buttons
   calLeft();
   calRight();
-  // saveButton();
-  // Calculate vehicle position
-  scaleToMM();
-  removeInflection();
-  calcDisplacement();
-  calcAngle();
 
-  detectSlope();
+  if (!isnan(displacement)&&calibrated)
+    if (pidSteering.Compute()){
+      computes++;
+      if (computes>100) {
+        // Serial.println((millis()-prevCompute)/100);
+        prevCompute=millis();
+        computes=0;
+      }
 
-  if (!digitalRead(MOTOR_EN_BUTTON)) {
-    motorEnableButton();
-    delay(500);
+      // saveButton();
+      // Calculate vehicle position
+      scaleToMM();
+      removeInflection();
+      calcDisplacement();
+      calcAngle();
+
+      detectSlope();
+
+      if (!digitalRead(MOTOR_EN_BUTTON)) {
+        motorEnableButton();
+        delay(500);
+      }
+
+      digitalWrite(OUTSIDE_WIRE_LED,outsideWires);
+
+      // Apply angle
+      maxSpeed=setSpeed;
+      if (angle>5) {
+        maxSpeed=map((uint16_t)angle,0,90,setSpeed,50);
+      } else{
+        maxSpeed=setSpeed;
+      }
+
+      // Apply boost
+      if(boost)
+        maxSpeed=BOOST_SPEED;
+
+      // Apply PID
+      int speedR=int(steeringRatio)+255;
+      int speedL=255-int(steeringRatio);
+      // Apply max speed
+      speedL=constrain(map(speedL,0,255,0,maxSpeed),0,255);
+      speedR=constrain(map(speedR,0,255,0,maxSpeed),0,255);
+
+      
+      // display if either amplitude is clipping high
+      if (rawL>=rawMax || rawR>=rawMax){
+      } else {
+        // display if either amplitude is too low. If it is, disable motors
+        if (rawL<MIN_SIGNAL || rawR<MIN_SIGNAL) {
+          if (!lowSignal){
+            motorsEnabled=false;
+            digitalWrite(LOW_SIGNAL_LED,HIGH);
+            lowSignal=true;
+            Serial.println("Low Signal");
+          }
+        } else {
+          if (lowSignal){
+            digitalWrite(LOW_SIGNAL_LED,LOW);
+            lowSignal=false;
+            Serial.println("Signal restored");
+          }
+        }
+      }
+
+      if (motorEnablePressed) {
+        motorEnablePressed=false;
+        if (motorsEnabled) {
+          motorsEnabled=false;
+          analogWrite(L_MOTOR_PIN,0);
+          analogWrite(R_MOTOR_PIN,0);
+          Serial.println("PWM output disabled");
+        } else {
+          motorsEnabled=true;
+          
+          Serial.println("PWM output enabled");
+        }
+        noInterrupts();
+        delay(100); // dodgey debounce
+        interrupts();
+      }
+
+      // Activate motors only if enable pressed, signal within range, and calibration data loaded
+      if (motorsEnabled) {
+        analogWrite(L_MOTOR_PIN,speedL);
+        analogWrite(R_MOTOR_PIN,speedR);
+      } else {
+        analogWrite(L_MOTOR_PIN,0);
+        analogWrite(R_MOTOR_PIN,0);
+      }
+      // Serial.print(">KP:");Serial.println(KP);
+      // Serial.print(">KI:");Serial.println(KI);
+      // Serial.print(">KD:");Serial.println(KD);
   }
 
-  digitalWrite(OUTSIDE_WIRE_LED,outsideWires);
+  // Serial.print(">tilt:");Serial.println(tilt);
+  // // Serial.print(">rawL:");Serial.println(rawL);
+  // // Serial.print(">rawR:");Serial.println(rawR);
+  // Serial.print(">speedL:");Serial.println(speedL);
+  // Serial.print(">speedR:");Serial.println(speedR);
+  // Serial.print(">maxSpeed:");Serial.println(maxSpeed);
 
-  // Apply angle
-  if (angle>5) {
-    maxSpeed=map((uint16_t)angle,0,90,setSpeed,50);
-  } else{
-    maxSpeed=setSpeed;
-  }
-
-  // Apply PID
-  int speedR=int(steeringRatio)+255;
-  int speedL=255-int(steeringRatio);
-  // Apply max speed
-  speedL=map(speedL,0,255,0,maxSpeed);
-  speedR=map(speedR,0,255,0,maxSpeed);
+  // // Serial.print(">linL:");Serial.println(linL);
+  // // Serial.print(">linR:");Serial.println(linR);
+  // Serial.print(">linL_mm:");Serial.println(linL_mm);
+  // Serial.print(">linR_mm:");Serial.println(linR_mm);
+  // Serial.print(">dispL_mm:");Serial.println(dispL_mm);
+  // Serial.print(">dispR_mm:");Serial.println(dispR_mm);
+  // Serial.print(">disp:");Serial.println(displacement);
+  // Serial.print(">angle:");Serial.println(angle);
 
   
-  // display if either amplitude is clipping high
-  if (rawL>=rawMax || rawR>=rawMax){
-  } else {
-    // display if either amplitude is too low. If it is, disable motors
-    if (rawL<MIN_SIGNAL || rawR<MIN_SIGNAL) {
-      if (!lowSignal){
-        motorsEnabled=false;
-        digitalWrite(LOW_SIGNAL_LED,HIGH);
-        lowSignal=true;
-        Serial.println("Low Signal");
-      }
-    } else {
-      if (lowSignal){
-        digitalWrite(LOW_SIGNAL_LED,LOW);
-        lowSignal=false;
-        Serial.println("Signal restored");
-      }
-    }
-  }
 
-  if (motorEnablePressed) {
-    motorEnablePressed=false;
-    if (motorsEnabled) {
-      motorsEnabled=false;
-      analogWrite(L_MOTOR_PIN,0);
-      analogWrite(R_MOTOR_PIN,0);
-      Serial.println("PWM output disabled");
-    } else {
-      motorsEnabled=true;
-      
-      Serial.println("PWM output enabled");
-    }
-    noInterrupts();
-    delay(100); // dodgey debounce
-    interrupts();
-  }
-
-  // Activate motors only if enable pressed, signal within range, and calibration data loaded
-  if (motorsEnabled) {
-    analogWrite(L_MOTOR_PIN,speedL);
-    analogWrite(R_MOTOR_PIN,speedR);
-  } else {
-    analogWrite(L_MOTOR_PIN,0);
-    analogWrite(R_MOTOR_PIN,0);
-  }
-
-  Serial.print(">tilt:");Serial.println(tilt);
-  // Serial.print(">rawL:");Serial.println(rawL);
-  // Serial.print(">rawR:");Serial.println(rawR);
-  Serial.print(">speedL:");Serial.println(speedL);
-  Serial.print(">speedR:");Serial.println(speedR);
-  Serial.print(">maxSpeed:");Serial.println(maxSpeed);
-
-  // Serial.print(">linL:");Serial.println(linL);
-  // Serial.print(">linR:");Serial.println(linR);
-  Serial.print(">linL_mm:");Serial.println(linL_mm);
-  Serial.print(">linR_mm:");Serial.println(linR_mm);
-  Serial.print(">dispL_mm:");Serial.println(dispL_mm);
-  Serial.print(">dispR_mm:");Serial.println(dispR_mm);
-  Serial.print(">disp:");Serial.println(displacement);
-  Serial.print(">angle:");Serial.println(angle);
-
-  Serial.print(">KP:");Serial.println(KP);
-  Serial.print(">KI:");Serial.println(KI);
-  Serial.print(">KD:");Serial.println(KD);
-
-  Serial.print(">ratio:");Serial.println(steeringRatio);
+  // Serial.print(">ratio:");Serial.println(steeringRatio);
   // Serial.print(">3D|position:S:cube:R:0:"); Serial.print(angle); Serial.print(":0:P:");Serial.print(displacement);Serial.println(":0:0");
   
-  if (!isnan(displacement)&&calibrated)
-    pidSteering.Compute();
+  
 }
