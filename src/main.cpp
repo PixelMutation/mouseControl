@@ -37,18 +37,22 @@
 #define PID_OUT_MAX 255
 
 #define KP_MIN 0
-#define KP_MAX 1000
+#define KP_MAX 15
 
-#define KI_MIN 10
-#define KI_MAX 10
+#define KI_MIN 0
+#define KI_MAX 3
 
 #define KD_MIN 0
-#define KD_MAX 50
+#define KD_MAX 0.2
+
 
 /* ---------------------------------- Boost --------------------------------- */
 
-#define BOOST_DURATION 800
+#define BOOST_DURATION 500
 #define BOOST_SPEED 255
+
+#define SLOW_DURATION 2000
+#define SLOW_SPEED 50
 
 /* -------------------------------------------------------------------------- */
 /*                               Pin definitions                              */
@@ -65,6 +69,8 @@
 #define KP_PIN A0
 #define KI_PIN A2
 #define KD_PIN A3
+
+#define SPEED_PIN A4
 /* --------------------------------- Sensors -------------------------------- */
 #define SLOPE_SENSOR 8
 /* --------------------------------- Buttons -------------------------------- */
@@ -91,7 +97,7 @@
 // Values from potentiometers
 uint16_t maxSpeed=100; // max speed to prevent flying off
 uint16_t setSpeed=100;
-uint16_t boostSpeed=255;
+// uint16_t boostSpeed=255;
 float KP,KI,KD; // PID loop settings
 
 /* ------------------------------ Measurements ------------------------------ */
@@ -123,6 +129,9 @@ double steeringRatio=0; // differential steering applies an offset to avgspeed f
 double avgSpeed=0; // avg speed of wheels, range 0-255
 bool motorsEnabled=false;
 
+int speedL,speedR;
+bool outsideWires=false;
+
 /* --------------------------------- Objects -------------------------------- */
 
 Oversampling lPeak(10,10+OVERSAMPLING,1);
@@ -152,9 +161,11 @@ void saveEEPROM() {
 // read settings
 void updatePID() {
   KP=floatMap(analogRead(KP_PIN),0,1024,KP_MIN,KP_MAX);
-  // KI=floatMap(analogRead(KI_PIN),0,1024,KI_MIN,KI_MAX);
+  if (abs(displacement)>20)
+    KP*=15;
+  KI=floatMap(analogRead(KI_PIN),0,1024,KI_MIN,KI_MAX);
   KD=floatMap(analogRead(KD_PIN),0,1024,KD_MIN,KD_MAX);
-  setSpeed=analogRead(KI_PIN)>>2;
+  setSpeed=analogRead(SPEED_PIN)>>2;
   // maxSpeed=analogRead(MAX_SPEED_PIN);
   pidSteering.SetTunings(KP,KI,KD);
 
@@ -220,7 +231,7 @@ void scaleToMM() {
 }
 // As soon as the difference is greater than COIL_SPACING, a coil has passed inflection
 // So we invert the output such that crossing the wire gives a negative output
-bool outsideWires=false;
+
 void removeInflection() {
   if (linL_mm+linR_mm>(float)(COIL_SPACING+INVERSION_OFFSET)) {
     // Serial.println("Outside wires");
@@ -253,18 +264,36 @@ void calcAngle() {
   angle=constrain(angle,0,90);
 }
 
+bool downSlope=true;
 bool boost=false;
 bool tilt=false;
+bool slow=false;
 unsigned long boostTime=0;
+unsigned long slowTime=0;
 // read slope sensor, boost if detected
 void detectSlope() {
   tilt=digitalRead(SLOPE_SENSOR);
   if (tilt && !boost) {
-    boost=true;
-    boostTime=millis()+BOOST_DURATION;
+    if (!downSlope){
+      boost=true;
+      Serial.println("Boost");
+      boostTime=millis()+BOOST_DURATION;
+      downSlope=true;
+    }
+    else {
+      downSlope=false;
+    }
   }
   if (millis()>=boostTime) {
-    boost=false;
+    if (boost) {
+      boost=false;
+      slow=true;
+      Serial.println("Slow");
+      slowTime=millis()+SLOW_DURATION;
+    }
+  }
+  if (millis()>=slowTime) {
+    slow=false;
   }
 }
 
@@ -286,7 +315,6 @@ void setup() {
   // init PWM pins
   pinMode(L_MOTOR_PIN,OUTPUT);
   pinMode(R_MOTOR_PIN,OUTPUT);
-  pinMode(SLOPE_SENSOR,INPUT_PULLUP);
   // init LED pins
   pinMode(OUTSIDE_WIRE_LED,OUTPUT);
   pinMode(LOW_SIGNAL_LED,OUTPUT);
@@ -294,6 +322,7 @@ void setup() {
   pinMode(MOTOR_EN_BUTTON,INPUT_PULLUP);
   pinMode(CAL_LEFT_BUTTON,INPUT_PULLUP);
   pinMode(CAL_RIGHT_BUTTON,INPUT_PULLUP);  
+  pinMode(SLOPE_SENSOR,INPUT_PULLUP);
 
   // readPotentiometers(); 
   loadEEPROM();
@@ -313,12 +342,15 @@ long prevupdatePID=0;
 unsigned long prevCompute=0;
 int computes=0;
 
+unsigned long prevPrint=0;
+
 void loop() {
   
-  if (millis()-prevupdatePID>500){
-    prevupdatePID=millis();
-    updatePID();
-  }
+  // if (millis()-prevupdatePID>500){
+  //   prevupdatePID=millis();
+  //   updatePID();
+  // }
+  updatePID();
   
   // Analog read
   readInductors();
@@ -354,22 +386,38 @@ void loop() {
       // Apply angle
       maxSpeed=setSpeed;
       if (angle>5) {
-        maxSpeed=map((uint16_t)angle,0,90,setSpeed,50);
+        int16_t factor=(int16_t)(angle*angle);
+        // Serial.println(factor);
+        maxSpeed=constrain((uint16_t)map(factor,0,4000,(int16_t)setSpeed,40),40,setSpeed);
       } else{
         maxSpeed=setSpeed;
       }
 
+      
+
+
+      // if (abs(displacement)>30)
+      //   maxSpeed=50;
+
+      // Set speed proportional to displacement, such that it slows down on corners
+      maxSpeed=constrain(map(abs(displacement),0,40,maxSpeed,40),35,maxSpeed);
+
       // Apply boost
       if(boost)
         maxSpeed=BOOST_SPEED;
+      if(slow)
+        maxSpeed=SLOW_SPEED;
 
       // Apply PID
-      int speedR=int(steeringRatio)+255;
-      int speedL=255-int(steeringRatio);
+      speedR=int(steeringRatio)+255;
+      speedL=255-int(steeringRatio);
       // Apply max speed
       speedL=constrain(map(speedL,0,255,0,maxSpeed),0,255);
       speedR=constrain(map(speedR,0,255,0,maxSpeed),0,255);
 
+      // if (outsideWires) {
+      //   speedR-=20;
+      // }
       
       // display if either amplitude is clipping high
       if (rawL>=rawMax || rawR>=rawMax){
@@ -400,7 +448,9 @@ void loop() {
           Serial.println("PWM output disabled");
         } else {
           motorsEnabled=true;
-          
+          pidSteering.SetOutputLimits(0,1);
+          pidSteering.SetOutputLimits(-1,0);
+          pidSteering.SetOutputLimits(PID_OUT_MIN,PID_OUT_MAX);
           Serial.println("PWM output enabled");
         }
         noInterrupts();
@@ -416,31 +466,35 @@ void loop() {
         analogWrite(L_MOTOR_PIN,0);
         analogWrite(R_MOTOR_PIN,0);
       }
-      // Serial.print(">KP:");Serial.println(KP);
-      // Serial.print(">KI:");Serial.println(KI);
-      // Serial.print(">KD:");Serial.println(KD);
+      
   }
 
-  // Serial.print(">tilt:");Serial.println(tilt);
-  // // Serial.print(">rawL:");Serial.println(rawL);
-  // // Serial.print(">rawR:");Serial.println(rawR);
-  // Serial.print(">speedL:");Serial.println(speedL);
-  // Serial.print(">speedR:");Serial.println(speedR);
-  // Serial.print(">maxSpeed:");Serial.println(maxSpeed);
+  if (millis()-prevPrint>100){
 
-  // // Serial.print(">linL:");Serial.println(linL);
-  // // Serial.print(">linR:");Serial.println(linR);
-  // Serial.print(">linL_mm:");Serial.println(linL_mm);
-  // Serial.print(">linR_mm:");Serial.println(linR_mm);
-  // Serial.print(">dispL_mm:");Serial.println(dispL_mm);
-  // Serial.print(">dispR_mm:");Serial.println(dispR_mm);
-  // Serial.print(">disp:");Serial.println(displacement);
-  // Serial.print(">angle:");Serial.println(angle);
+    Serial.print(">tilt:");Serial.println(tilt);
+    // // Serial.print(">rawL:");Serial.println(rawL);
+    // // Serial.print(">rawR:");Serial.println(rawR);
+    Serial.print(">speedL:");Serial.println(speedL);
+    Serial.print(">speedR:");Serial.println(speedR);
+    Serial.print(">maxSpeed:");Serial.println(maxSpeed);
+    Serial.print(">setSpeed:");Serial.println(setSpeed);
 
-  
+    // // Serial.print(">linL:");Serial.println(linL);
+    // // Serial.print(">linR:");Serial.println(linR);
+    // Serial.print(">linL_mm:");Serial.println(linL_mm);
+    // Serial.print(">linR_mm:");Serial.println(linR_mm);
+    // Serial.print(">dispL_mm:");Serial.println(dispL_mm);
+    // Serial.print(">dispR_mm:");Serial.println(dispR_mm);
+    Serial.print(">disp:");Serial.println(displacement);
+    Serial.print(">angle:");Serial.println(angle);
 
-  // Serial.print(">ratio:");Serial.println(steeringRatio);
-  // Serial.print(">3D|position:S:cube:R:0:"); Serial.print(angle); Serial.print(":0:P:");Serial.print(displacement);Serial.println(":0:0");
-  
-  
+    Serial.print(">KP:");Serial.println(KP);
+    Serial.print(">KI:");Serial.println(KI);
+    Serial.print(">KD:");Serial.println(KD);
+    
+
+    // Serial.print(">ratio:");Serial.println(steeringRatio);
+    // Serial.print(">3D|position:S:cube:R:0:"); Serial.print(angle); Serial.print(":0:P:");Serial.print(displacement);Serial.println(":0:0");
+    
+  }
 }
